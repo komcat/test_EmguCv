@@ -118,6 +118,13 @@ namespace CircleDetectorApp
                 {
                     Console.WriteLine($"Best parameters: Canny={e.Parameters["CannyThreshold"]}, " +
                                      $"Accumulator={e.Parameters["AccumulatorThreshold"]}");
+
+                    int canny = (int)e.Parameters["CannyThreshold"];
+                    int acc = (int)e.Parameters["AccumulatorThreshold"];
+
+                    Console.WriteLine("\nRunning Hough one time with the best parameters...");
+                    RunHughOneTime(canny, acc);
+
                 }
             }
             else
@@ -129,6 +136,24 @@ namespace CircleDetectorApp
                 {
                     Console.WriteLine($"Tested {e.ResultInfo["ParameterCombinationsTested"]} parameter combinations");
                 }
+            }
+        }
+
+        private static void RunHughOneTime(int canny, int acc)
+        {
+            EmguCvPrepration cvPrepration = new EmguCvPrepration();
+
+            string testFilePath = Path.Combine(Environment.CurrentDirectory, "ROI_Image_20250308_153116.png");
+            Mat testImage = cvPrepration.LoadImageFromFile(testFilePath);
+
+
+            EmguCvHough cvHough = new EmguCvHough();
+            string outputFile = Path.Combine(Environment.CurrentDirectory, "TestImageResult.png");
+            CircleF[] circles = cvHough.FindCirclesFromImage(testImage, outputFile, 30, 80, canny, acc, 100);
+
+            foreach (CircleF circle in circles)
+            {
+                Console.WriteLine($"Center: {circle.Center}, Radius: {circle.Radius}");
             }
         }
     }
