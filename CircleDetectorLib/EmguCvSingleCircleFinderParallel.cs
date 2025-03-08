@@ -12,6 +12,93 @@ using Emgu.CV.CvEnum;
 namespace CircleDetectorLib
 {
     /// <summary>
+    /// Arguments for progress reporting events
+    /// </summary>
+    public class ProgressEventArgs : EventArgs
+    {
+        /// <summary>
+        /// Current progress value
+        /// </summary>
+        public int Current { get; }
+
+        /// <summary>
+        /// Total operations to complete
+        /// </summary>
+        public int Total { get; }
+
+        /// <summary>
+        /// Progress percentage (0-100)
+        /// </summary>
+        public double PercentComplete { get; }
+
+        /// <summary>
+        /// Optional status message
+        /// </summary>
+        public string Message { get; }
+
+        public ProgressEventArgs(int current, int total, string message = null)
+        {
+            Current = current;
+            Total = total;
+            PercentComplete = total > 0 ? (current * 100.0 / total) : 0;
+            Message = message;
+        }
+    }
+
+    /// <summary>
+    /// Arguments for status message events
+    /// </summary>
+    public class StatusMessageEventArgs : EventArgs
+    {
+        /// <summary>
+        /// The status message
+        /// </summary>
+        public string Message { get; }
+
+        /// <summary>
+        /// Indicates if this is a warning or error message
+        /// </summary>
+        public bool IsWarningOrError { get; }
+
+        public StatusMessageEventArgs(string message, bool isWarningOrError = false)
+        {
+            Message = message;
+            IsWarningOrError = isWarningOrError;
+        }
+    }
+
+    /// <summary>
+    /// Arguments for circle detection result events
+    /// </summary>
+    public class CircleDetectionResultEventArgs : EventArgs
+    {
+        /// <summary>
+        /// The detected circle
+        /// </summary>
+        public CircleF? Circle { get; }
+
+        /// <summary>
+        /// Parameters used for detection
+        /// </summary>
+        public Dictionary<string, object> Parameters { get; }
+
+        /// <summary>
+        /// Additional result information
+        /// </summary>
+        public Dictionary<string, object> ResultInfo { get; }
+
+        public CircleDetectionResultEventArgs(
+            CircleF? circle,
+            Dictionary<string, object> parameters,
+            Dictionary<string, object> resultInfo)
+        {
+            Circle = circle;
+            Parameters = parameters;
+            ResultInfo = resultInfo;
+        }
+    }
+
+    /// <summary>
     /// Specializes in finding a single circle closest to a target diameter and center of image
     /// using parallel processing for parameter optimization
     /// </summary>
@@ -23,7 +110,13 @@ namespace CircleDetectorLib
         // Weight factors for scoring circles (can be adjusted)
         private double _sizeWeight = 0.7;  // How important size match is (0-1)
         private double _centerWeight = 0.3; // How important center proximity is (0-1)
-        private bool SaveFileDuringIteration = false;
+        public bool SaveFileDuringIteration { get; set; } = false;
+
+        // Events for reporting progress and results
+        public event EventHandler<ProgressEventArgs> ProgressChanged;
+        public event EventHandler<StatusMessageEventArgs> StatusMessageReported;
+        public event EventHandler<CircleDetectionResultEventArgs> CircleDetectionCompleted;
+
         public EmguCvSingleCircleFinderCenter(double sizeWeight = 0.7, double centerWeight = 0.3)
         {
             _houghCircleDetector = new EmguCvHough();
@@ -41,6 +134,34 @@ namespace CircleDetectorLib
                 _sizeWeight = sizeWeight;
                 _centerWeight = centerWeight;
             }
+        }
+
+        /// <summary>
+        /// Raises the ProgressChanged event
+        /// </summary>
+        protected virtual void OnProgressChanged(int current, int total, string message = null)
+        {
+            ProgressChanged?.Invoke(this, new ProgressEventArgs(current, total, message));
+        }
+
+        /// <summary>
+        /// Raises the StatusMessageReported event
+        /// </summary>
+        protected virtual void OnStatusMessageReported(string message, bool isWarningOrError = false)
+        {
+            StatusMessageReported?.Invoke(this, new StatusMessageEventArgs(message, isWarningOrError));
+        }
+
+        /// <summary>
+        /// Raises the CircleDetectionCompleted event
+        /// </summary>
+        protected virtual void OnCircleDetectionCompleted(
+            CircleF? circle,
+            Dictionary<string, object> parameters,
+            Dictionary<string, object> resultInfo)
+        {
+            CircleDetectionCompleted?.Invoke(this,
+                new CircleDetectionResultEventArgs(circle, parameters, resultInfo));
         }
 
         /// <summary>
@@ -101,6 +222,8 @@ namespace CircleDetectorLib
         /// <param name="accumEnd">Ending value for accumulator threshold (default: 100)</param>
         /// <param name="accumStep">Step size for accumulator threshold (default: 2)</param>
         /// <param name="maxThreads">Maximum number of threads to use (default: number of processor cores)</param>
+        /// <param name="saveIntermediateResults">Whether to save intermediate images during parameter search</param>
+        /// <param name="maxIntermediateImagesSaved">Maximum number of intermediate images to save</param>
         /// <returns>The found circle or null if none found</returns>
         public CircleF? FindSingleCircleParallel(
             string imagePath,
@@ -113,7 +236,9 @@ namespace CircleDetectorLib
             int accumStart = 10,
             int accumEnd = 100,
             int accumStep = 2,
-            int maxThreads = 0)
+            int maxThreads = 0,
+            bool saveIntermediateResults = false,
+            int maxIntermediateImagesSaved = 20)
         {
             // If maxThreads is not specified, use the number of processors
             if (maxThreads <= 0)
@@ -128,9 +253,9 @@ namespace CircleDetectorLib
             PointF imageCenter = new PointF(image.Width / 2f, image.Height / 2f);
             Size imageSize = new Size(image.Width, image.Height);
 
-            // Create log directory for parameter search if outputPath is provided
+            // Create log directory for parameter search if outputPath is provided and intermediate saving is enabled
             string logDir = null;
-            if (!string.IsNullOrEmpty(outputPath))
+            if (!string.IsNullOrEmpty(outputPath) && saveIntermediateResults && SaveFileDuringIteration)
             {
                 logDir = System.IO.Path.Combine(
                     System.IO.Path.GetDirectoryName(outputPath),
@@ -141,8 +266,6 @@ namespace CircleDetectorLib
                     System.IO.Directory.CreateDirectory(logDir);
                 }
             }
-
-
 
             // Generate all parameter combinations
             var parameterCombinations = new List<(int Canny, int Accum)>();
@@ -156,20 +279,29 @@ namespace CircleDetectorLib
 
             int totalCombinations = parameterCombinations.Count;
 
-            Console.WriteLine($"Starting parallel parameter search with {totalCombinations} combinations...");
-            Console.WriteLine($"Canny range: {cannyStart}-{cannyEnd}, step {cannyStep}");
-            Console.WriteLine($"Accumulator range: {accumStart}-{accumEnd}, step {accumStep}");
-            Console.WriteLine($"Target diameter: {targetDiameter} px");
-            Console.WriteLine($"Using {maxThreads} threads");
-            Console.WriteLine($"Weighting: Size={_sizeWeight * 100:F0}%, Center Proximity={_centerWeight * 100:F0}%");
-            Console.WriteLine();
+            // Report initial status
+            OnStatusMessageReported($"Starting parallel parameter search with {totalCombinations} combinations...");
+            OnStatusMessageReported($"Canny range: {cannyStart}-{cannyEnd}, step {cannyStep}");
+            OnStatusMessageReported($"Accumulator range: {accumStart}-{accumEnd}, step {accumStep}");
+            OnStatusMessageReported($"Target diameter: {targetDiameter} px");
+            OnStatusMessageReported($"Using {maxThreads} threads");
+            OnStatusMessageReported($"Weighting: Size={_sizeWeight * 100:F0}%, Center Proximity={_centerWeight * 100:F0}%");
+
+            if (saveIntermediateResults && SaveFileDuringIteration)
+                OnStatusMessageReported($"Saving up to {maxIntermediateImagesSaved} intermediate results");
+            else
+                OnStatusMessageReported("Not saving intermediate results (final result only)");
 
             // Counter for progress reporting
             int processedCount = 0;
             int circlesFound = 0;
+            int intermediateImagesSaved = 0;
 
             // Thread-safe collection for results
             ConcurrentBag<CircleSearchResult> results = new ConcurrentBag<CircleSearchResult>();
+
+            // For tracking best intermediate results to save
+            ConcurrentBag<CircleSearchResult> bestResultsToSave = new ConcurrentBag<CircleSearchResult>();
 
             // Create a thread-safe progress reporting mechanism
             object lockObj = new object();
@@ -226,7 +358,7 @@ namespace CircleDetectorLib
                             // If within tolerance (or if no tolerance specified), add to results
                             if (diameterTolerance <= 0 || bestSizeDiff <= diameterTolerance)
                             {
-                                results.Add(new CircleSearchResult
+                                var result = new CircleSearchResult
                                 {
                                     Circle = bestCircle,
                                     Canny = canny,
@@ -234,63 +366,17 @@ namespace CircleDetectorLib
                                     SizeDifference = bestSizeDiff,
                                     CenterDistance = bestCenterDist,
                                     Score = bestScore
-                                });
+                                };
+
+                                results.Add(result);
 
                                 // Increment the circles found counter
                                 Interlocked.Increment(ref circlesFound);
 
-                                // Save intermediate results if log directory is provided
-                                if (logDir != null && bestScore < 0.2) // Only save good matches
+                                // If this is a good match and we're saving intermediate results, add to candidates
+                                if (saveIntermediateResults && SaveFileDuringIteration && bestScore < 0.15) // Higher threshold for better matches
                                 {
-                                    try
-                                    {
-                                        // Clone the image for drawing (thread-safe)
-                                        using (Mat outputImage = threadImage.Clone())
-                                        {
-                                            // Draw the circle
-                                            using (Mat drawnImage = _houghCircleDetector.DrawCircles(
-                                                outputImage, new[] { bestCircle }, new MCvScalar(0, 0, 255), 2))
-                                            {
-                                                // Draw a line from center of image to center of circle
-                                                Point imgCenter = new Point((int)imageCenter.X, (int)imageCenter.Y);
-                                                Point circleCenter = new Point((int)bestCircle.Center.X, (int)bestCircle.Center.Y);
-                                                CvInvoke.Line(drawnImage, imgCenter, circleCenter, new MCvScalar(255, 255, 0), 1);
-
-                                                // Draw cross at image center
-                                                int crossSize = 10;
-                                                CvInvoke.Line(drawnImage,
-                                                    new Point(imgCenter.X - crossSize, imgCenter.Y),
-                                                    new Point(imgCenter.X + crossSize, imgCenter.Y),
-                                                    new MCvScalar(0, 255, 255), 1);
-                                                CvInvoke.Line(drawnImage,
-                                                    new Point(imgCenter.X, imgCenter.Y - crossSize),
-                                                    new Point(imgCenter.X, imgCenter.Y + crossSize),
-                                                    new MCvScalar(0, 255, 255), 1);
-
-                                                // Add text with information
-                                                Point textPos = new Point(
-                                                    (int)bestCircle.Center.X - (int)bestCircle.Radius,
-                                                    (int)bestCircle.Center.Y - (int)bestCircle.Radius - 10);
-
-                                                CvInvoke.PutText(drawnImage,
-                                                    $"C{canny} A{accum} D={bestCircle.Radius * 2:F1}px Dist={bestCenterDist:F1}px",
-                                                    textPos,
-                                                    FontFace.HersheyComplex, 0.5, new MCvScalar(0, 255, 0), 1);
-
-                                                // Use thread-safe file naming
-                                                string intermediatePath = System.IO.Path.Combine(
-                                                    logDir,
-                                                    $"C{canny}_A{accum}_D{bestCircle.Radius * 2:F1}_Dist{bestCenterDist:F0}.png");
-
-                                                CvInvoke.Imwrite(intermediatePath, drawnImage);
-                                            }
-                                        }
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        // If there's an error saving the image, just log it and continue
-                                        Console.WriteLine($"Error saving image: {ex.Message}");
-                                    }
+                                    bestResultsToSave.Add(result);
                                 }
                             }
                         }
@@ -301,11 +387,11 @@ namespace CircleDetectorLib
                     {
                         processedCount++;
 
-                        // Display progress every 100 combinations or when reaching milestones
+                        // Report progress every 100 combinations or when reaching milestones
                         if (processedCount % 100 == 0 || processedCount == totalCombinations)
                         {
-                            Console.WriteLine($"Progress: {processedCount}/{totalCombinations} combinations tested " +
-                                              $"({(processedCount * 100.0 / totalCombinations):F1}%)");
+                            OnProgressChanged(processedCount, totalCombinations,
+                                $"Testing parameter combinations: {processedCount}/{totalCombinations}");
                         }
                     }
                 });
@@ -331,22 +417,104 @@ namespace CircleDetectorLib
                 }
             }
 
+            // Save intermediate results if enabled
+            if (saveIntermediateResults && SaveFileDuringIteration && logDir != null)
+            {
+                // Sort results by score (best first) and take only up to maxIntermediateImagesSaved
+                var sortedResults = bestResultsToSave.OrderBy(r => r.Score).Take(maxIntermediateImagesSaved);
+
+                int savedCount = 0;
+                foreach (var result in sortedResults)
+                {
+                    try
+                    {
+                        using (Mat outputImage = image.Clone())
+                        {
+                            // Draw the circle
+                            using (Mat drawnImage = _houghCircleDetector.DrawCircles(
+                                outputImage, new[] { result.Circle }, new MCvScalar(0, 0, 255), 2))
+                            {
+                                // Draw a line from center of image to center of circle
+                                Point imgCenter = new Point((int)imageCenter.X, (int)imageCenter.Y);
+                                Point circleCenter = new Point((int)result.Circle.Center.X, (int)result.Circle.Center.Y);
+                                CvInvoke.Line(drawnImage, imgCenter, circleCenter, new MCvScalar(255, 255, 0), 1);
+
+                                // Draw cross at image center
+                                int crossSize = 10;
+                                CvInvoke.Line(drawnImage,
+                                    new Point(imgCenter.X - crossSize, imgCenter.Y),
+                                    new Point(imgCenter.X + crossSize, imgCenter.Y),
+                                    new MCvScalar(0, 255, 255), 1);
+                                CvInvoke.Line(drawnImage,
+                                    new Point(imgCenter.X, imgCenter.Y - crossSize),
+                                    new Point(imgCenter.X, imgCenter.Y + crossSize),
+                                    new MCvScalar(0, 255, 255), 1);
+
+                                // Add text with information
+                                Point textPos = new Point(
+                                    (int)result.Circle.Center.X - (int)result.Circle.Radius,
+                                    (int)result.Circle.Center.Y - (int)result.Circle.Radius - 10);
+
+                                CvInvoke.PutText(drawnImage,
+                                    $"C{result.Canny} A{result.Accum} D={result.Circle.Radius * 2:F1}px Dist={result.CenterDistance:F1}px",
+                                    textPos,
+                                    FontFace.HersheyComplex, 0.5, new MCvScalar(0, 255, 0), 1);
+
+                                // Use thread-safe file naming
+                                string intermediatePath = System.IO.Path.Combine(
+                                    logDir,
+                                    $"Rank{savedCount + 1}_Score{result.Score:F3}_C{result.Canny}_A{result.Accum}.png");
+
+                                CvInvoke.Imwrite(intermediatePath, drawnImage);
+                                savedCount++;
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // If there's an error saving the image, just log it and continue
+                        OnStatusMessageReported($"Error saving image: {ex.Message}", true);
+                    }
+                }
+
+                OnStatusMessageReported($"Saved {savedCount} intermediate results out of {bestResultsToSave.Count} candidates");
+            }
+
+            // Prepare result information
+            Dictionary<string, object> parameters = new Dictionary<string, object>
+            {
+                { "CannyThreshold", bestCanny },
+                { "AccumulatorThreshold", bestAccum },
+                { "TargetDiameter", targetDiameter },
+                { "SizeWeight", _sizeWeight },
+                { "CenterWeight", _centerWeight }
+            };
+
+            Dictionary<string, object> resultInfo = new Dictionary<string, object>
+            {
+                { "ParameterCombinationsTested", processedCount },
+                { "CirclesFound", circlesFound },
+                { "Score", bestScore },
+                { "DiameterDifference", bestSizeDiff },
+                { "DiameterDifferencePercent", bestSizeDiff / targetDiameter * 100 },
+                { "CenterDistance", bestCenterDist }
+            };
+
             // If we found a circle and output path is provided, draw and save
             if (bestCircle.HasValue && !string.IsNullOrEmpty(outputPath))
             {
-                Console.WriteLine();
-                Console.WriteLine($"Parameter search completed!");
-                Console.WriteLine($"Tested {processedCount} parameter combinations");
-                Console.WriteLine($"Found {circlesFound} circles in total");
-                Console.WriteLine($"Best parameters: Canny={bestCanny}, Accum={bestAccum}");
-                Console.WriteLine($"Best circle: Center=({bestCircle.Value.Center.X:F1}, {bestCircle.Value.Center.Y:F1}), " +
-                                  $"Diameter={bestCircle.Value.Radius * 2:F1}px (Target: {targetDiameter}px)");
-                Console.WriteLine($"Diameter difference: {bestSizeDiff:F1}px ({bestSizeDiff / targetDiameter * 100:F1}% of target)");
-                Console.WriteLine($"Distance from image center: {bestCenterDist:F1}px");
-                Console.WriteLine($"Combined score: {bestScore:F4} (lower is better)");
+                OnStatusMessageReported($"Parameter search completed!");
+                OnStatusMessageReported($"Tested {processedCount} parameter combinations");
+                OnStatusMessageReported($"Found {circlesFound} circles in total");
+                OnStatusMessageReported($"Best parameters: Canny={bestCanny}, Accum={bestAccum}");
+                OnStatusMessageReported($"Best circle: Center=({bestCircle.Value.Center.X:F1}, {bestCircle.Value.Center.Y:F1}), " +
+                              $"Diameter={bestCircle.Value.Radius * 2:F1}px (Target: {targetDiameter}px)");
+                OnStatusMessageReported($"Diameter difference: {bestSizeDiff:F1}px ({bestSizeDiff / targetDiameter * 100:F1}% of target)");
+                OnStatusMessageReported($"Distance from image center: {bestCenterDist:F1}px");
+                OnStatusMessageReported($"Combined score: {bestScore:F4} (lower is better)");
 
                 // Create a summary file
-                if (logDir != null)
+                if (logDir != null && SaveFileDuringIteration)
                 {
                     string summaryPath = System.IO.Path.Combine(logDir, "search_summary.txt");
                     using (System.IO.StreamWriter writer = new System.IO.StreamWriter(summaryPath))
@@ -397,7 +565,7 @@ namespace CircleDetectorLib
 
                         // Add text with information
                         Point textPos = new Point((int)bestCircle.Value.Center.X - (int)bestCircle.Value.Radius,
-                                                 (int)bestCircle.Value.Center.Y - (int)bestCircle.Value.Radius - 10);
+                                               (int)bestCircle.Value.Center.Y - (int)bestCircle.Value.Radius - 10);
                         CvInvoke.PutText(drawnImage,
                             $"BEST: C{bestCanny} A{bestAccum} D={bestCircle.Value.Radius * 2:F1}px",
                             textPos,
@@ -405,7 +573,7 @@ namespace CircleDetectorLib
 
                         // Add distance information
                         Point distPos = new Point((int)bestCircle.Value.Center.X - (int)bestCircle.Value.Radius,
-                                                 (int)bestCircle.Value.Center.Y - (int)bestCircle.Value.Radius - 35);
+                                               (int)bestCircle.Value.Center.Y - (int)bestCircle.Value.Radius - 35);
                         CvInvoke.PutText(drawnImage,
                             $"Center dist: {bestCenterDist:F1}px",
                             distPos,
@@ -417,10 +585,12 @@ namespace CircleDetectorLib
             }
             else
             {
-                Console.WriteLine();
-                Console.WriteLine($"Parameter search completed. No circles found matching the criteria.");
-                Console.WriteLine($"Tested {processedCount} parameter combinations");
+                OnStatusMessageReported($"Parameter search completed. No circles found matching the criteria.");
+                OnStatusMessageReported($"Tested {processedCount} parameter combinations");
             }
+
+            // Notify about the final result
+            OnCircleDetectionCompleted(bestCircle, parameters, resultInfo);
 
             // Clean up
             image.Dispose();

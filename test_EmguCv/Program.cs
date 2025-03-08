@@ -2,98 +2,134 @@
 using System.IO;
 using Emgu.CV;
 using Emgu.CV.Structure;
-using Emgu.CV.CvEnum;
-using System.Drawing;
 using CircleDetectorLib;
 
-namespace test_EmguCv
+namespace CircleDetectorApp
 {
     class Program
     {
         static void Main(string[] args)
         {
-            Console.WriteLine("Starting image processing...");
-
-
             string inputFile = "test.png";
-            string outputDir = Path.GetDirectoryName(inputFile) ?? ".";
-            string baseName = Path.GetFileNameWithoutExtension(inputFile);
-            string extension = Path.GetExtension(inputFile);
+            string outputPath = "result.png";
+            double targetDiameter = 99; // Target circle diameter in pixels
 
-            // Create instances of our classes
-            EmguCvPrepration processor = new EmguCvPrepration();
-            EmguCvHough circleDetector = new EmguCvHough();
+            // Create the circle finder with custom weights
+            var circleFinder = new EmguCvSingleCircleFinderCenter(sizeWeight: 0.7, centerWeight: 0.3);
 
-            // Step 1: Load the image
-            Console.WriteLine($"Loading image: {inputFile}");
-            Mat originalImage = processor.LoadImageFromFile(inputFile);
+            // Disable intermediate file saving
+            circleFinder.SaveFileDuringIteration = false;
 
-            // Create instance of the center-aware circle finder (customize weights if needed)
-            EmguCvSingleCircleFinderCenter centerFinder = new EmguCvSingleCircleFinderCenter(
-                sizeWeight: 0.7,    // 70% importance on size match
-                centerWeight: 0.3); // 30% importance on center proximity
+            // Subscribe to events for progress and status updates
+            circleFinder.ProgressChanged += OnProgressChanged;
+            circleFinder.StatusMessageReported += OnStatusMessageReported;
+            circleFinder.CircleDetectionCompleted += OnCircleDetectionCompleted;
 
-            // Run a parallel parameter search
-            string outputPath = Path.Combine(outputDir, $"center_aware_circle_{baseName}{extension}");
-            CircleF? bestCircle = centerFinder.FindSingleCircleParallel(
-                inputFile,
-                targetDiameter: 100,  // Your target diameter in pixels
-                outputPath: outputPath,
-                // Using step size of 2 for faster iteration
-                cannyStep: 2,
-                accumStep: 2
-            );
-
-            if (bestCircle.HasValue)
+            try
             {
-                Console.WriteLine($"Found optimal circle with diameter: {bestCircle.Value.Radius * 2:F1}px");
+                // Find the circle
+                var circle = circleFinder.FindSingleCircleParallel(
+                    imagePath: inputFile,
+                    targetDiameter: targetDiameter,
+                    outputPath: outputPath,
+                    cannyStart: 50,
+                    cannyEnd: 150,
+                    accumStart: 20,
+                    accumEnd: 80);
+
+                // Process result if needed (additional to event handling)
+                if (circle.HasValue)
+                {
+                    Console.WriteLine($"Circle found and saved to {outputPath}");
+                }
+                else
+                {
+                    Console.WriteLine("No circle found matching the criteria.");
+                }
             }
-            //EmguCvHough emguCvHough = new EmguCvHough();
-            //// Process an image with contour-based circle detection
-
-            //int canny = 10;
-            //int accum = 10;
-
-            //int cannymax = 200;
-            //int accummax = 100;
-
-            //while (canny < cannymax)
-            //{
-            //    while (accum < accummax)
-            //    {
-            //        string contourOutputFile = Path.Combine(outputDir, $"hugh_circle_{canny}_{accum}_{baseName}{extension}");
-            //        List<string> circleInfo = emguCvHough.ProcessAndSaveCircleDetection(originalImage,
-            //            contourOutputFile,
-            //            minRadius: 40,
-            //            maxRadius: 60,
-            //            cannyThreshold: canny,
-            //            accumulatorThreshold: accum,
-            //            minDistBetweenCircles: 100);
-
-            //        // Print information about detected circles with parameters
-            //        Console.WriteLine($"Parameters: Canny={canny}, Accumulator={accum}");
-            //        Console.WriteLine($"Detected {circleInfo.Count} circles:");
-            //        foreach (string info in circleInfo)
-            //        {
-            //            Console.WriteLine(info);
-            //        }
-            //        Console.WriteLine(); // Add empty line for better readability
-
-            //        accum++;
-            //    }
-            //    canny++;
-            //}
-
-
-
-            // Don't forget to dispose
-            originalImage.Dispose();
-
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error processing image: {ex.Message}");
+            }
 
             Console.WriteLine("Press any key to exit...");
             Console.ReadKey();
         }
+
+        // Event handlers
+        private static void OnProgressChanged(object sender, ProgressEventArgs e)
+        {
+            // Update progress bar or status
+            Console.WriteLine($"Progress: {e.Current}/{e.Total} ({e.PercentComplete:F1}%)");
+
+            // You could update a progress bar in a GUI application
+            // progressBar.Value = (int)e.PercentComplete;
+        }
+
+        private static void OnStatusMessageReported(object sender, StatusMessageEventArgs e)
+        {
+            // Display status messages
+            if (e.IsWarningOrError)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"WARNING: {e.Message}");
+                Console.ResetColor();
+
+                // In a GUI app you might log this or show in a different way
+                // logTextBox.AppendText($"WARNING: {e.Message}\n");
+            }
+            else
+            {
+                Console.WriteLine(e.Message);
+
+                // In a GUI app you might do:
+                // statusTextBox.AppendText($"{e.Message}\n");
+            }
+        }
+
+        private static void OnCircleDetectionCompleted(object sender, CircleDetectionResultEventArgs e)
+        {
+            if (e.Circle.HasValue)
+            {
+                CircleF circle = e.Circle.Value;
+
+                Console.WriteLine("\nCIRCLE DETECTION RESULTS:");
+                Console.WriteLine($"Circle center: ({circle.Center.X:F1}, {circle.Center.Y:F1})");
+                Console.WriteLine($"Circle diameter: {circle.Radius * 2:F1} pixels");
+
+                // Access additional result information
+                if (e.ResultInfo.ContainsKey("Score"))
+                {
+                    Console.WriteLine($"Detection score: {e.ResultInfo["Score"]:F4}");
+                }
+
+                if (e.ResultInfo.ContainsKey("DiameterDifferencePercent"))
+                {
+                    Console.WriteLine($"Diameter difference: {e.ResultInfo["DiameterDifferencePercent"]:F1}%");
+                }
+
+                if (e.ResultInfo.ContainsKey("CenterDistance"))
+                {
+                    Console.WriteLine($"Distance from image center: {e.ResultInfo["CenterDistance"]:F1} pixels");
+                }
+
+                // Additional information about parameters used
+                if (e.Parameters.ContainsKey("CannyThreshold") && e.Parameters.ContainsKey("AccumulatorThreshold"))
+                {
+                    Console.WriteLine($"Best parameters: Canny={e.Parameters["CannyThreshold"]}, " +
+                                     $"Accumulator={e.Parameters["AccumulatorThreshold"]}");
+                }
+            }
+            else
+            {
+                Console.WriteLine("\nNo circle was detected that matches the criteria.");
+
+                // You might still want to know how many combinations were tested
+                if (e.ResultInfo.ContainsKey("ParameterCombinationsTested"))
+                {
+                    Console.WriteLine($"Tested {e.ResultInfo["ParameterCombinationsTested"]} parameter combinations");
+                }
+            }
+        }
     }
-
-
 }
